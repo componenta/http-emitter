@@ -49,17 +49,21 @@ Before emitting, `Emitter` checks that headers have not already been sent and cl
 
 | Strategy | When it is used |
 |---|---|
-| `NoBody` | Informational statuses, `204`, `304`, `416`, or unsatisfiable `Content-Range`. |
+| `NoBody` | Informational statuses, `204`, `205`, or `304`. |
 | `Partial` | Status `206` with a `Content-Range` header. |
 | `Full` | All other responses. |
 
-For full responses, the emitter adds `Content-Length` when the stream size is known and the header is missing. For seekable streams with known size it also adds `Accept-Ranges: bytes`. Bodies are streamed in chunks and stop early if the client disconnects.
+For full responses, the emitter adds `Content-Length` when the stream is seekable, its size is known, and both `Content-Length` and `Transfer-Encoding` are absent. For non-seekable streams it sends the remaining body without inferring its length from the total stream size. For seekable streams with known size it also adds `Accept-Ranges: bytes`. Bodies are streamed in chunks and stop early if the client disconnects.
 
-For partial responses, a valid `Content-Range` controls the emitted byte range when the body stream is seekable. If the range cannot be parsed or the stream is not seekable, the emitter falls back to emitting the full body that is present in the response.
+For partial responses, the emitter sends the body already prepared by the response producer and preserves `Content-Range`. Responses with status `416` retain their explanatory body. Responses with status `304` retain `Content-Location` while emitting no body.
 
 ## Configuration
 
 The config provider registers `Emitter` and aliases `EmitterInterface` to it. Applications normally receive the emitter from the container.
+
+## Tests
+
+Run `composer test`. HTTP header tests use `php-cgi` beside the active PHP executable; set `PHP_CGI_BINARY` when it is installed elsewhere. These tests are skipped if CGI is unavailable, so install CGI in CI to verify response headers as well as bodies.
 
 ## Related Packages
 

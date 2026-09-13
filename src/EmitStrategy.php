@@ -33,8 +33,8 @@ enum EmitStrategy
      * Used for:
      * - 1xx Informational responses
      * - 204 No Content
+     * - 205 Reset Content
      * - 304 Not Modified
-     * - 416 Range Not Satisfiable
      * - HEAD requests (when body is empty)
      */
     case NoBody;

@@ -1,0 +1,95 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Componenta\Http\Tests;
+
+use Composer\Autoload\ClassLoader;
+use PHPUnit\Framework\TestCase;
+use ReflectionClass;
+
+final class EmitterHeadersTest extends TestCase
+{
+    public function testDoesNotAddContentLengthWhenTransferEncodingIsSet(): void
+    {
+        [$headers] = $this->emit(200, ['Transfer-Encoding' => 'chunked'], 'abc');
+
+        self::assertStringContainsString('Transfer-Encoding: chunked', $headers);
+        self::assertStringNotContainsString('Content-Length:', $headers);
+    }
+
+    public function testPreservesNotModifiedResponseMetadataWithoutEmittingABody(): void
+    {
+        [$headers, $body] = $this->emit(304, [
+            'Content-Location' => '/documents/one',
+            'ETag' => '"one"',
+        ], 'discarded');
+
+        self::assertStringContainsString('Content-Location: /documents/one', $headers);
+        self::assertStringContainsString('ETag: "one"', $headers);
+        self::assertSame('', $body);
+    }
+
+    public function testLengthDescribesTheEmittedPartOfANonSeekableStream(): void
+    {
+        [$headers, $body] = $this->emit(200, [], 'abcdef', nonSeekable: true, consumed: 2);
+
+        self::assertSame('cdef', $body);
+        if (preg_match('/^Content-Length:\s*(\d+)/mi', $headers, $match)) {
+            self::assertSame('4', $match[1]);
+        }
+    }
+
+    public function testConsumedSeekableBodyIsRewoundBeforeEmission(): void
+    {
+        [$headers, $body] = $this->emit(200, [], 'abcdef', consumed: 2);
+
+        self::assertSame('abcdef', $body);
+        self::assertStringContainsString('Content-Length: 6', $headers);
+    }
+
+    /** @return array{string, string} */
+    private function emit(int $status, array $headers, string $body, bool $nonSeekable = false, int $consumed = 0): array
+    {
+        $binary = getenv('PHP_CGI_BINARY') ?: dirname(PHP_BINARY) . '/php-cgi' . (PHP_OS_FAMILY === 'Windows' ? '.exe' : '');
+        if (!is_file($binary)) {
+            self::markTestSkipped('Install php-cgi or set PHP_CGI_BINARY to run HTTP header checks.');
+        }
+
+        $fixture = __DIR__ . '/Fixture/emit.php';
+        $autoload = dirname((new ReflectionClass(ClassLoader::class))->getFileName(), 2) . '/autoload.php';
+        $command = [$binary];
+        if (is_string($ini = php_ini_loaded_file())) {
+            array_push($command, '-c', $ini);
+        }
+        array_push($command, '-d', 'cgi.force_redirect=0', '-f', $fixture);
+        $pipes = [];
+        $process = proc_open(
+            $command,
+            [0 => ['pipe', 'r'], 1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            $pipes,
+            __DIR__,
+            array_replace(getenv(), [
+                'REQUEST_METHOD' => 'GET',
+                'REDIRECT_STATUS' => '1',
+                'SCRIPT_FILENAME' => $fixture,
+                'SCRIPT_NAME' => '/emit.php',
+                'DOCUMENT_ROOT' => dirname($fixture),
+                'COMPONENTA_TEST_AUTOLOAD' => $autoload,
+                'COMPONENTA_TEST_RESPONSE' => json_encode([$status, $headers, $body, $nonSeekable, $consumed], JSON_THROW_ON_ERROR),
+            ]),
+        );
+        self::assertIsResource($process);
+        fclose($pipes[0]);
+        $output = stream_get_contents($pipes[1]);
+        $error = stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+
+        self::assertSame(0, proc_close($process), $error . $output);
+        $response = explode("\r\n\r\n", $output, 2);
+        self::assertCount(2, $response);
+
+        return $response;
+    }
+}

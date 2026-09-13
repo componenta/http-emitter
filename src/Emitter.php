@@ -11,7 +11,7 @@ use Psr\Http\Message\StreamInterface;
  * PSR-7 HTTP Response Emitter
  *
  * Automatically selects the optimal emission strategy based on response:
- * - NoBody: For 1xx, 204, 304, 416 status codes
+ * - NoBody: For 1xx, 204, 205, 304 status codes
  * - Partial: For 206 status with Content-Range header
  * - Full: For all other responses
  *
@@ -36,14 +36,18 @@ final class Emitter implements EmitterInterface
     private const int DEFAULT_CHUNK_SIZE = 8192;
 
     /** @var list<int> HTTP status codes that must not include a message body */
-    private const array BODYLESS_STATUSES = [100, 101, 102, 103, 204, 304, 416];
+    private const array BODYLESS_STATUSES = [100, 101, 102, 103, 204, 205, 304];
 
     /**
-     * @param int $chunkSize Chunk size in bytes for streaming large responses
+     * @param positive-int $chunkSize Chunk size in bytes for streaming large responses
      */
     public function __construct(
         private readonly int $chunkSize = self::DEFAULT_CHUNK_SIZE,
-    ) {}
+    ) {
+        if ($chunkSize <= 0) {
+            throw new \InvalidArgumentException('Chunk size must be greater than zero.');
+        }
+    }
 
     public function emit(ResponseInterface $response): void
     {
@@ -52,8 +56,7 @@ final class Emitter implements EmitterInterface
 
         match ($this->resolveStrategy($response)) {
             EmitStrategy::NoBody => $this->emitNoBody($response),
-            EmitStrategy::Partial => $this->emitPartial($response),
-            EmitStrategy::Full => $this->emitFull($response),
+            EmitStrategy::Partial, EmitStrategy::Full => $this->emitFull($response),
         };
     }
 
@@ -69,11 +72,7 @@ final class Emitter implements EmitterInterface
             return EmitStrategy::NoBody;
         }
 
-        // Unsatisfiable range: "bytes */1000"
         $contentRange = $response->getHeaderLine('Content-Range');
-        if ($contentRange !== '' && str_starts_with($contentRange, 'bytes */')) {
-            return EmitStrategy::NoBody;
-        }
 
         // Partial content with valid Content-Range
         if ($status === 206 && $contentRange !== '') {
@@ -84,22 +83,11 @@ final class Emitter implements EmitterInterface
     }
 
     /**
-     * Emits response without body (1xx, 204, 304, etc.)
+     * Emits response without body (1xx, 204, 205, 304, etc.)
      */
     private function emitNoBody(ResponseInterface $response): void
     {
-        // 416 keeps Content-Range header per RFC 7233
-        if ($response->getStatusCode() !== 416) {
-            $response = $this->stripContentHeaders($response);
-        } else {
-            $response = $response
-                ->withoutHeader('Content-Type')
-                ->withoutHeader('Content-Encoding')
-                ->withoutHeader('Content-Language')
-                ->withoutHeader('Content-Location')
-                ->withoutHeader('Content-MD5')
-                ->withHeader('Content-Length', '0');
-        }
+        $response = $this->stripContentHeaders($response);
 
         $this->emitStatusLine($response);
         $this->emitHeaders($response);
@@ -113,8 +101,13 @@ final class Emitter implements EmitterInterface
         $body = $response->getBody();
         $size = $body->getSize();
 
-        // Add Content-Length if size is known and header is missing
-        if ($size !== null && !$response->hasHeader('Content-Length')) {
+        // Only a seekable body is emitted from the beginning, so its full size is reliable.
+        if (
+            $size !== null
+            && $body->isSeekable()
+            && !$response->hasHeader('Content-Length')
+            && !$response->hasHeader('Transfer-Encoding')
+        ) {
             $response = $response->withHeader('Content-Length', (string) $size);
         }
 
@@ -130,61 +123,6 @@ final class Emitter implements EmitterInterface
         $this->emitStatusLine($response);
         $this->emitHeaders($response);
         $this->emitBody($body);
-    }
-
-    /**
-     * Emits partial content (206) with range support
-     */
-    private function emitPartial(ResponseInterface $response): void
-    {
-        $body = $response->getBody();
-        $contentRange = $response->getHeaderLine('Content-Range');
-        $range = $this->parseContentRange($contentRange);
-
-        // Add Content-Length for the range per RFC 7233
-        if ($range !== null && !$response->hasHeader('Content-Length')) {
-            $response = $response->withHeader('Content-Length', (string) $range['length']);
-        }
-
-        if (!$response->hasHeader('Accept-Ranges')) {
-            $response = $response->withHeader('Accept-Ranges', 'bytes');
-        }
-
-        $this->emitStatusLine($response);
-        $this->emitHeaders($response);
-
-        // Emit only the specified range if stream is seekable
-        if ($range !== null && $body->isSeekable()) {
-            $this->emitBodyRange($body, $range['start'], $range['length']);
-        } else {
-            $this->emitBody($body);
-        }
-    }
-
-    /**
-     * Parses Content-Range header value
-     *
-     * @return array{start: int, length: int}|null Parsed range or null if invalid
-     */
-    private function parseContentRange(string $header): ?array
-    {
-        // Format: "bytes 0-499/1000" or "bytes */1000" (unsatisfiable)
-        if (!preg_match('/^bytes (\d+)-(\d+)\/(\d+|\*)$/', $header, $matches)) {
-            return null;
-        }
-
-        $start = (int) $matches[1];
-        $end = (int) $matches[2];
-
-        // Validate range logic
-        if ($end < $start) {
-            return null;
-        }
-
-        return [
-            'start' => $start,
-            'length' => $end - $start + 1,
-        ];
     }
 
     /**
@@ -239,41 +177,19 @@ final class Emitter implements EmitterInterface
     }
 
     /**
-     * Emits a specific byte range from the body
-     *
-     * @param int $start Starting byte position
-     * @param int $length Number of bytes to emit
-     */
-    private function emitBodyRange(StreamInterface $body, int $start, int $length): void
-    {
-        $body->seek($start);
-        $remaining = $length;
-
-        while ($remaining > 0 && !$body->eof()) {
-            $chunk = $body->read(min($this->chunkSize, $remaining));
-            $remaining -= strlen($chunk);
-
-            echo $chunk;
-
-            if (connection_aborted()) {
-                break;
-            }
-
-            $this->flush();
-        }
-    }
-
-    /**
-     * Removes all content-related headers
+     * Removes body headers while retaining the representation location required for 304
      */
     private function stripContentHeaders(ResponseInterface $response): ResponseInterface
     {
+        if ($response->getStatusCode() !== 304) {
+            $response = $response->withoutHeader('Content-Location');
+        }
+
         return $response
             ->withoutHeader('Content-Type')
             ->withoutHeader('Content-Length')
             ->withoutHeader('Content-Encoding')
             ->withoutHeader('Content-Language')
-            ->withoutHeader('Content-Location')
             ->withoutHeader('Content-MD5')
             ->withoutHeader('Content-Range');
     }
@@ -296,7 +212,14 @@ final class Emitter implements EmitterInterface
     private function cleanBuffers(): void
     {
         while (ob_get_level() > 0) {
-            ob_end_clean();
+            $buffer = ob_get_status();
+            $flags = $buffer['flags'] ?? null;
+            if (!is_int($flags) || ($flags & PHP_OUTPUT_HANDLER_REMOVABLE) === 0) {
+                throw new EmitterException('Cannot remove the active output buffer before emitting a response.');
+            }
+            if (!ob_end_clean()) {
+                throw new EmitterException('Cannot clean the active output buffer before emitting a response.');
+            }
         }
     }
 
