@@ -232,7 +232,7 @@ final class Emitter implements EmitterInterface
     {
         // Check the entire stack before discarding any buffer.
         foreach (ob_get_status(true) as $buffer) {
-            $flags = $buffer['flags'] ?? null;
+            $flags = is_array($buffer) ? ($buffer['flags'] ?? null) : null;
             if (!is_int($flags) || ($flags & PHP_OUTPUT_HANDLER_REMOVABLE) === 0) {
                 throw new EmitterException('Cannot remove an active output buffer before emitting a response.');
             }
