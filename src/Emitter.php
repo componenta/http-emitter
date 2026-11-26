@@ -84,7 +84,8 @@ final class Emitter implements EmitterInterface
             'Content-Length', 'Transfer-Encoding', 'Trailer', 'Status', 'Location',
             'Content-Type', 'Content-Encoding', 'Content-Language', 'Content-Location',
             'Content-Range', 'Content-Disposition', 'Content-MD5', 'Content-Digest',
-            'Repr-Digest',
+            'Repr-Digest', 'Accept-Ranges', 'ETag', 'Last-Modified',
+            'X-Accel-Redirect', 'X-Sendfile', 'X-Accel-Limit-Rate',
         ] as $name) {
             header_remove($name);
         }
