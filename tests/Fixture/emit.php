@@ -27,6 +27,6 @@ try {
         throw $exception;
     }
     header_remove();
-    http_response_code(500);
+    header('HTTP/1.1 500 Internal Server Error', true, 500);
     echo 'rejected';
 }

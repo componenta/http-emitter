@@ -28,8 +28,8 @@
             ]
         },
         "branch-alias": {
-            "dev-main": "1.0.x-dev",
-            "dev-fix/http-response-audit": "1.0.x-dev"
+            "dev-main": "2.0.x-dev",
+            "dev-fix/http-response-audit": "2.0.x-dev"
         }
     },
     "minimum-stability": "stable",
@@ -42,7 +42,7 @@
     },
     "scripts": {
         "test": "@php vendor/bin/phpunit --configuration phpunit.xml.dist",
-        "phpstan": "@php vendor/bin/phpstan analyse src --level=8 --no-progress",
+        "phpstan": "@php vendor/bin/phpstan analyse src --level=max --no-progress",
         "check": [
             "@test",
             "@phpstan"

@@ -71,3 +71,5 @@ Run `composer test`. HTTP header tests use `php-cgi` beside the active PHP execu
 - [`componenta/http-responder`](../http-responder/README.md) builds PSR-7 responses.
 
 On a failure after output has started, the transport must terminate the incomplete response; never emit an error page as a second response. Explicit `Accept-Ranges` and `Content-Range` are the producer's responsibility. Automatic range advertisement and caller-supplied transfer coding are removed. Configuration supports Config 3 and 4.
+
+`composer check` runs the strict PHPUnit suite and PHPStan. `composer benchmark` measures actual CGI response emission for small/large bodies, non-seekable streams, prepared ranges, no-content and HEAD responses. It includes PHP process startup and IPC overhead, so it is an end-to-end SAPI measurement rather than a microbenchmark of the emitter alone. Install a matching `php-cgi` or set `PHP_CGI_BINARY`.
