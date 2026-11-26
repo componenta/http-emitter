@@ -35,7 +35,8 @@ enum EmitStrategy
      * - 204 No Content
      * - 205 Reset Content
      * - 304 Not Modified
-     * - HEAD requests (when body is empty)
+     *
+     * HEAD suppression is handled separately, irrespective of body size.
      */
     case NoBody;
 }

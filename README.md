@@ -8,6 +8,8 @@ Use this package at the outer HTTP entry point after the PSR-15 pipeline has pro
 
 This package only emits an already built response. It does not build responses, create server requests, or run middleware. Use `componenta/http-responder` for response creation and `componenta/app-http` for the HTTP runtime pipeline.
 
+For changes from 1.x, see [the upgrade guide](UPGRADE.md).
+
 ## Installation
 
 ```bash
