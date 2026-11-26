@@ -85,6 +85,59 @@ final class EmitterHeadersTest extends TestCase
         self::assertSame('rejected', $body);
     }
 
+    public function testExplicitLengthIsCanonicalizedAndMatchingNonSeekableLengthIsAccepted(): void
+    {
+        [$headers, $body] = $this->emit(200, ['Content-Length' => '0004'], 'abcdef', nonSeekable: true, consumed: 2);
+        self::assertSame('cdef', $body);
+        self::assertStringContainsString('Content-Length: 4', $headers);
+    }
+
+    public function testLengthMismatchAfterOutputNeverProducesASecondResponse(): void
+    {
+        [$headers, $body] = $this->emit(200, ['Content-Length' => '2'], 'abcd', nonSeekable: true, failAfterOutput: true);
+        self::assertSame('ab', $body);
+        self::assertStringContainsString('Content-Length: 2', $headers);
+
+        [$headers, $body] = $this->emit(200, ['Content-Length' => '4'], 'ab', nonSeekable: true, failAfterOutput: true);
+        self::assertSame('ab', $body);
+        self::assertStringContainsString('Content-Length: 4', $headers);
+    }
+
+    public function testStagedFramingIsReplacedAndMultipleCookiesArePreserved(): void
+    {
+        [$headers, $body] = $this->emit(200, [
+            'Set-Cookie' => ['a=1; Path=/', 'b=2; Path=/'],
+            'X-Test' => ['one', 'two'],
+        ], 'abc', staged: [
+            'Content-Length' => '999',
+            'Transfer-Encoding' => 'chunked',
+            'Set-Cookie' => 'session=old; Path=/',
+        ]);
+        self::assertSame('abc', $body);
+        self::assertStringContainsString('Content-Length: 3', $headers);
+        self::assertStringNotContainsString('Content-Length: 999', $headers);
+        self::assertStringNotContainsString('Transfer-Encoding:', $headers);
+        foreach (['session=old', 'a=1', 'b=2'] as $cookie) {
+            self::assertStringContainsString('Set-Cookie: ' . $cookie, $headers);
+        }
+        self::assertStringContainsString('X-Test: one', $headers);
+        self::assertStringContainsString('X-Test: two', $headers);
+    }
+
+    public function testExplicitNotModifiedRepresentationLengthIsPreserved(): void
+    {
+        [$headers, $body] = $this->emit(304, ['Content-Length' => '123'], 'discarded');
+        self::assertSame('', $body);
+        self::assertStringContainsString('Content-Length: 123', $headers);
+    }
+
+    public function testHeadLengthCanBeInferredWithoutEmittingBody(): void
+    {
+        [$headers, $body] = $this->emit(200, [], 'representation', method: 'HEAD');
+        self::assertSame('', $body);
+        self::assertStringContainsString('Content-Length: 14', $headers);
+    }
+
     public function testPreservesNotModifiedResponseMetadataWithoutEmittingABody(): void
     {
         [$headers, $body] = $this->emit(304, [
@@ -116,7 +169,7 @@ final class EmitterHeadersTest extends TestCase
     }
 
     /** @return array{string, string} */
-    private function emit(int $status, array $headers, string $body, bool $nonSeekable = false, int $consumed = 0, string $method = 'GET', bool $expectFailure = false, bool $stall = false, bool $prohibitRead = false): array
+    private function emit(int $status, array $headers, string $body, bool $nonSeekable = false, int $consumed = 0, string $method = 'GET', bool $expectFailure = false, bool $stall = false, bool $prohibitRead = false, bool $failAfterOutput = false, array $staged = []): array
     {
         $binary = getenv('PHP_CGI_BINARY') ?: dirname(PHP_BINARY) . '/php-cgi' . (PHP_OS_FAMILY === 'Windows' ? '.exe' : '');
         if (!is_file($binary)) {
@@ -143,7 +196,7 @@ final class EmitterHeadersTest extends TestCase
                 'SCRIPT_NAME' => '/emit.php',
                 'DOCUMENT_ROOT' => dirname($fixture),
                 'COMPONENTA_TEST_AUTOLOAD' => $autoload,
-                'COMPONENTA_TEST_RESPONSE' => json_encode([$status, $headers, $body, $nonSeekable, $consumed, $expectFailure, $stall, $prohibitRead], JSON_THROW_ON_ERROR),
+                'COMPONENTA_TEST_RESPONSE' => json_encode([$status, $headers, $body, $nonSeekable, $consumed, $expectFailure, $stall, $prohibitRead, $failAfterOutput, $staged], JSON_THROW_ON_ERROR),
             ]),
         );
         self::assertIsResource($process);
@@ -154,6 +207,11 @@ final class EmitterHeadersTest extends TestCase
         fclose($pipes[2]);
 
         self::assertSame(0, proc_close($process), $error . $output);
+        if ($failAfterOutput) {
+            self::assertStringContainsString('emission-failed-after-output', (string) $error);
+        } else {
+            self::assertSame('', $error);
+        }
         $response = explode("\r\n\r\n", $output, 2);
         self::assertCount(2, $response);
 

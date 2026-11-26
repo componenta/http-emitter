@@ -197,10 +197,9 @@ final class Emitter implements EmitterInterface
                     : $this->chunkSize;
                 $chunk = $body->read($limit);
                 if ($chunk === '') {
-                    if ($body->eof()) {
-                        break;
-                    }
-                    throw new EmitterException('Response body stream made no progress.');
+                    // EOF can change as a consequence of read(). Inspect it
+                    // after leaving the loop instead of assuming progress.
+                    break;
                 }
                 if ($remaining !== null) {
                     $length = strlen($chunk);
@@ -215,6 +214,9 @@ final class Emitter implements EmitterInterface
                     return;
                 }
                 flush();
+            }
+            if (!$body->eof()) {
+                throw new EmitterException('Response body stream made no progress.');
             }
         } catch (EmitterException $exception) {
             throw $exception;
