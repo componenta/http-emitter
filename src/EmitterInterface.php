@@ -6,26 +6,17 @@ namespace Componenta\Http;
 
 use Psr\Http\Message\ResponseInterface;
 
-/**
- * PSR-7 HTTP Response Emitter Interface
- *
- * Implementations are responsible for sending HTTP responses to the client,
- * including status line, headers, and body content.
- */
+/** Sends a prepared PSR-7 response to the current HTTP transport. */
 interface EmitterInterface
 {
     /**
-     * Emits a PSR-7 response to the client
+     * Emits status, headers and permitted content.
      *
-     * The emitter automatically determines the optimal emission strategy
-     * based on the response status code and headers:
+     * The producer owns representation semantics, including range selection.
+     * Implementations must not emit content for bodyless statuses.
      *
-     * - NoBody: For 1xx, 204, 304, 416 status codes
-     * - Partial: For 206 status with Content-Range header
-     * - Full: For all other responses with complete body streaming
-     *
-     * @param ResponseInterface $response PSR-7 response to emit
-     * @throws EmitterException If headers have already been sent
+     * @throws EmitterException If emission fails. Once headers or content have
+     * been sent, callers must not attempt to emit a replacement response.
      */
     public function emit(ResponseInterface $response): void;
 }

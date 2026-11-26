@@ -7,40 +7,11 @@ namespace Componenta\Http;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\StreamInterface;
 
-/**
- * PSR-7 HTTP Response Emitter
- *
- * Automatically selects the optimal emission strategy based on response:
- * - NoBody: For 1xx, 204, 205, 304 status codes
- * - Partial: For 206 status with Content-Range header
- * - Full: For all other responses
- *
- * Features:
- * - Chunked streaming for large responses
- * - Proper handling of Content-Range for partial content
- * - Automatic Content-Length and Accept-Ranges headers
- * - Connection abort detection
- * - Output buffer cleanup
- *
- * @example
- * ```php
- * $emitter = new Emitter();
- * $emitter->emit($response);
- *
- * // With custom chunk size for streaming
- * $emitter = new Emitter(chunkSize: 16384);
- * ```
- */
+/** Emits a prepared PSR-7 response through PHP's native HTTP SAPI. */
 final class Emitter implements EmitterInterface
 {
     private const int DEFAULT_CHUNK_SIZE = 8192;
 
-    /** @var list<int> HTTP status codes that must not include a message body */
-    private const array BODYLESS_STATUSES = [100, 101, 102, 103, 204, 205, 304];
-
-    /**
-     * @param positive-int $chunkSize Chunk size in bytes for streaming large responses
-     */
     public function __construct(
         private readonly int $chunkSize = self::DEFAULT_CHUNK_SIZE,
     ) {
@@ -49,106 +20,165 @@ final class Emitter implements EmitterInterface
         }
     }
 
+    #[\Override]
     public function emit(ResponseInterface $response): void
     {
         $this->assertCanEmit();
-        $this->cleanBuffers();
 
-        match ($this->resolveStrategy($response)) {
-            EmitStrategy::NoBody => $this->emitNoBody($response),
-            EmitStrategy::Partial, EmitStrategy::Full => $this->emitFull($response),
-        };
-    }
-
-    /**
-     * Determines the emission strategy based on response status and headers
-     */
-    private function resolveStrategy(ResponseInterface $response): EmitStrategy
-    {
         $status = $response->getStatusCode();
+        $strategy = $this->resolveStrategy($response);
+        $head = ($_SERVER['REQUEST_METHOD'] ?? null) === 'HEAD';
+        $body = null;
+        $length = null;
 
-        // Informational and special status codes without body
-        if (in_array($status, self::BODYLESS_STATUSES, true) || $status < 200) {
-            return EmitStrategy::NoBody;
+        if ($strategy === EmitStrategy::NoBody) {
+            $response = $this->prepareBodylessResponse($response);
+        } else {
+            if ($response->hasHeader('Transfer-Encoding') || $response->hasHeader('Trailer')) {
+                throw new EmitterException('Transfer coding and trailers belong to the HTTP transport, not the response producer.');
+            }
+
+            $body = $response->getBody();
+            $length = $this->contentLength($response);
+            $size = $body->isSeekable() ? $body->getSize() : null;
+            $offloaded = $response->hasHeader('X-Accel-Redirect') || $response->hasHeader('X-Sendfile');
+
+            if (!$head) {
+                if (!$body->isReadable()) {
+                    throw new EmitterException('Response body is not readable.');
+                }
+                // A seekable stream represents the whole body. Rewind before
+                // sending headers so an unusable stream cannot commit a response.
+                if ($body->isSeekable()) {
+                    try {
+                        $body->rewind();
+                    } catch (\Throwable $exception) {
+                        throw new EmitterException('Could not rewind the response body.', previous: $exception);
+                    }
+                }
+                if ($length !== null && $size !== null && $length !== $size) {
+                    throw new EmitterException('Content-Length does not match the response body size.');
+                }
+            }
+            if ($length === null && $size !== null && !$offloaded && (!$head || $size > 0)) {
+                $length = $size;
+                $response = $response->withHeader('Content-Length', (string) $size);
+            } elseif ($length !== null) {
+                // Canonical decimal form, including valid leading-zero inputs.
+                $response = $response->withHeader('Content-Length', (string) $length);
+            }
         }
 
-        $contentRange = $response->getHeaderLine('Content-Range');
+        $this->validateMetadata($response);
+        $this->cleanBuffers();
+        $this->assertCanEmit();
 
-        // Partial content with valid Content-Range
-        if ($status === 206 && $contentRange !== '') {
-            return EmitStrategy::Partial;
+        // Earlier PHP code may have staged framing headers. The final PSR-7
+        // response owns these fields; PHP/the web server owns transfer coding.
+        foreach (['Content-Length', 'Transfer-Encoding', 'Trailer'] as $name) {
+            header_remove($name);
         }
 
-        return EmitStrategy::Full;
-    }
-
-    /**
-     * Emits response without body (1xx, 204, 205, 304, etc.)
-     */
-    private function emitNoBody(ResponseInterface $response): void
-    {
-        $response = $this->stripContentHeaders($response);
-
-        $this->emitStatusLine($response);
         $this->emitHeaders($response);
-    }
-
-    /**
-     * Emits complete response body
-     */
-    private function emitFull(ResponseInterface $response): void
-    {
-        $body = $response->getBody();
-        $size = $body->getSize();
-
-        // Only a seekable body is emitted from the beginning, so its full size is reliable.
-        if (
-            $size !== null
-            && $body->isSeekable()
-            && !$response->hasHeader('Content-Length')
-            && !$response->hasHeader('Transfer-Encoding')
-        ) {
-            $response = $response->withHeader('Content-Length', (string) $size);
-        }
-
-        // Advertise range support for seekable streams with known size
-        if (
-            !$response->hasHeader('Accept-Ranges')
-            && $size !== null
-            && $body->isSeekable()
-        ) {
-            $response = $response->withHeader('Accept-Ranges', 'bytes');
-        }
-
-        $this->emitStatusLine($response);
-        $this->emitHeaders($response);
-        $this->emitBody($body);
-    }
-
-    /**
-     * Emits HTTP status line
-     */
-    private function emitStatusLine(ResponseInterface $response): void
-    {
+        // PHP can implicitly change the status when setting Location. Apply the
+        // final response's status after the fields, before emitting any bytes.
         header(sprintf(
             'HTTP/%s %d %s',
             $response->getProtocolVersion(),
-            $response->getStatusCode(),
+            $status,
             $response->getReasonPhrase(),
-        ), true, $response->getStatusCode());
+        ), true, $status);
+
+        if ($body !== null && !$head) {
+            $this->emitBody($body, $length);
+        }
     }
 
-    /**
-     * Emits all response headers
-     *
-     * Handles multiple values per header and special Set-Cookie behavior
-     */
+    private function resolveStrategy(ResponseInterface $response): EmitStrategy
+    {
+        $status = $response->getStatusCode();
+        if ($status < 200 || in_array($status, [204, 205, 304], true)) {
+            return EmitStrategy::NoBody;
+        }
+
+        return $status === 206 && $response->getHeaderLine('Content-Range') !== ''
+            ? EmitStrategy::Partial
+            : EmitStrategy::Full;
+    }
+
+    private function prepareBodylessResponse(ResponseInterface $response): ResponseInterface
+    {
+        $status = $response->getStatusCode();
+        $response = $response
+            ->withoutHeader('Transfer-Encoding')
+            ->withoutHeader('Trailer')
+            ->withoutHeader('Content-Type')
+            ->withoutHeader('Content-Encoding')
+            ->withoutHeader('Content-Language')
+            ->withoutHeader('Content-MD5')
+            ->withoutHeader('Content-Range');
+
+        if ($status !== 304) {
+            $response = $response->withoutHeader('Content-Location')->withoutHeader('Content-Length');
+        }
+        if ($status === 205) {
+            return $response->withHeader('Content-Length', '0');
+        }
+        if ($status === 304 && ($length = $this->contentLength($response)) !== null) {
+            // In a 304, an explicit length describes the selected 200
+            // representation, not the discarded body. The producer owns it.
+            $response = $response->withHeader('Content-Length', (string) $length);
+        }
+
+        return $response;
+    }
+
+    private function contentLength(ResponseInterface $response): ?int
+    {
+        if (!$response->hasHeader('Content-Length')) {
+            return null;
+        }
+        $values = $response->getHeader('Content-Length');
+        if (count($values) !== 1 || preg_match('/\A[0-9]+\z/', $values[0]) !== 1) {
+            throw new EmitterException('Content-Length must be one decimal integer.');
+        }
+        $digits = ltrim($values[0], '0');
+        if ($digits === '') {
+            return 0;
+        }
+        $max = (string) PHP_INT_MAX;
+        if (strlen($digits) > strlen($max) || (strlen($digits) === strlen($max) && strcmp($digits, $max) > 0)) {
+            throw new EmitterException('Content-Length exceeds the supported integer range.');
+        }
+
+        return (int) $digits;
+    }
+
+    private function validateMetadata(ResponseInterface $response): void
+    {
+        if ($response->getStatusCode() < 100 || $response->getStatusCode() > 599
+            || preg_match('/\A[0-9]+(?:\.[0-9]+)?\z/', $response->getProtocolVersion()) !== 1
+            || preg_match('/[\x00-\x08\x0a-\x1f\x7f]/', $response->getReasonPhrase()) === 1) {
+            throw new EmitterException('Invalid HTTP response status line.');
+        }
+
+        foreach ($response->getHeaders() as $name => $values) {
+            if (preg_match("@^[!#$%&'*+.^_\x60|~0-9A-Za-z-]+$@D", $name) !== 1) {
+                throw new EmitterException('Invalid HTTP response field name.');
+            }
+            foreach ($values as $value) {
+                if (preg_match('/[\x00-\x08\x0a-\x1f\x7f]/', $value) === 1) {
+                    throw new EmitterException('Invalid HTTP response field value.');
+                }
+            }
+        }
+    }
+
     private function emitHeaders(ResponseInterface $response): void
     {
         foreach ($response->getHeaders() as $name => $values) {
-            // Set-Cookie headers must never replace each other
+            // Preserve cookies already staged by PHP session handling.
             $replace = strtolower($name) !== 'set-cookie';
-
             foreach ($values as $value) {
                 header("{$name}: {$value}", $replace);
                 $replace = false;
@@ -156,78 +186,62 @@ final class Emitter implements EmitterInterface
         }
     }
 
-    /**
-     * Emits complete body in chunks
-     */
-    private function emitBody(StreamInterface $body): void
+    private function emitBody(StreamInterface $body, ?int $remaining): void
     {
-        if ($body->isSeekable()) {
-            $body->rewind();
-        }
+        try {
+            while (!$body->eof()) {
+                // At most one excess byte is read when enforcing a declared
+                // length. Never emit bytes outside the declared message frame.
+                $limit = $remaining !== null && $remaining < $this->chunkSize
+                    ? $remaining + 1
+                    : $this->chunkSize;
+                $chunk = $body->read($limit);
+                if ($chunk === '') {
+                    if ($body->eof()) {
+                        break;
+                    }
+                    throw new EmitterException('Response body stream made no progress.');
+                }
+                if ($remaining !== null) {
+                    $length = strlen($chunk);
+                    if ($length > $remaining) {
+                        throw new EmitterException('Response body exceeds Content-Length.');
+                    }
+                    $remaining -= $length;
+                }
 
-        while (!$body->eof()) {
-            echo $body->read($this->chunkSize);
-
-            if (connection_aborted()) {
-                break;
+                echo $chunk;
+                if (connection_aborted()) {
+                    return;
+                }
+                flush();
             }
-
-            $this->flush();
+        } catch (EmitterException $exception) {
+            throw $exception;
+        } catch (\Throwable $exception) {
+            throw new EmitterException('Could not read the response body.', previous: $exception);
+        }
+        if ($remaining !== null && $remaining !== 0 && !connection_aborted()) {
+            throw new EmitterException('Response body ended before Content-Length was satisfied.');
         }
     }
 
-    /**
-     * Removes body headers while retaining the representation location required for 304
-     */
-    private function stripContentHeaders(ResponseInterface $response): ResponseInterface
-    {
-        if ($response->getStatusCode() !== 304) {
-            $response = $response->withoutHeader('Content-Location');
-        }
-
-        return $response
-            ->withoutHeader('Content-Type')
-            ->withoutHeader('Content-Length')
-            ->withoutHeader('Content-Encoding')
-            ->withoutHeader('Content-Language')
-            ->withoutHeader('Content-MD5')
-            ->withoutHeader('Content-Range');
-    }
-
-    /**
-     * Flushes output buffers to send data immediately
-     */
-    private function flush(): void
-    {
-        if (ob_get_level() > 0) {
-            ob_flush();
-        }
-
-        flush();
-    }
-
-    /**
-     * Cleans all output buffers before emitting
-     */
     private function cleanBuffers(): void
     {
-        while (ob_get_level() > 0) {
-            $buffer = ob_get_status();
+        // Check the entire stack before discarding any buffer.
+        foreach (ob_get_status(true) as $buffer) {
             $flags = $buffer['flags'] ?? null;
             if (!is_int($flags) || ($flags & PHP_OUTPUT_HANDLER_REMOVABLE) === 0) {
-                throw new EmitterException('Cannot remove the active output buffer before emitting a response.');
+                throw new EmitterException('Cannot remove an active output buffer before emitting a response.');
             }
+        }
+        while (ob_get_level() > 0) {
             if (!ob_end_clean()) {
                 throw new EmitterException('Cannot clean the active output buffer before emitting a response.');
             }
         }
     }
 
-    /**
-     * Ensures headers have not been sent yet
-     *
-     * @throws EmitterException If headers were already sent
-     */
     private function assertCanEmit(): void
     {
         if (headers_sent($file, $line)) {
