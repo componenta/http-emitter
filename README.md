@@ -77,3 +77,5 @@ On a failure after output has started, the transport must terminate the incomple
 The final PSR-7 response owns CGI control fields and representation headers. Previously staged values for these fields are removed before emission; unrelated native headers such as session cookies are retained. Do not set a separate `Status` field, or repeat `Location` or `Content-Type`. Successful `CONNECT` responses require a tunnel-capable transport and are rejected by this SAPI emitter.
 
 File offload directives (`X-Accel-Redirect`, `X-Sendfile`, `X-Accel-Limit-Rate`), range capability and representation validators (`Accept-Ranges`, `ETag`, `Last-Modified`) are taken only from the final response. Staged values from earlier native PHP code cannot select a different file or describe a different representation.
+
+If the final response explicitly sets `Cache-Control`, native `X-Accel-Expires` and `Expires` staged earlier are cleared before the final response's headers are emitted. Native cache defaults remain when no replacement `Cache-Control` is provided. Explicit fields in the final response remain the producer's responsibility.

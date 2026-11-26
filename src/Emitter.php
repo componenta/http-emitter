@@ -90,6 +90,14 @@ final class Emitter implements EmitterInterface
             header_remove($name);
         }
 
+        // An explicit final Cache-Control policy must not inherit an old
+        // nginx cache lifetime, which can take precedence over Cache-Control.
+        // Keep native cache defaults when the response supplies no policy.
+        if ($response->hasHeader('Cache-Control')) {
+            header_remove('X-Accel-Expires');
+            header_remove('Expires');
+        }
+
         $this->emitHeaders($response);
         // PHP can implicitly change the status when setting Location. Apply the
         // final response's status after the fields, before emitting any bytes.
