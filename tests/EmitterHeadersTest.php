@@ -124,6 +124,55 @@ final class EmitterHeadersTest extends TestCase
         self::assertStringContainsString('X-Test: two', $headers);
     }
 
+    public function testEarlierRepresentationHeadersDoNotDescribeTheNewBody(): void
+    {
+        [$headers, $body] = $this->emit(200, ['Content-Type' => 'text/plain'], 'abc', staged: [
+            'Content-Encoding' => 'gzip',
+            'Content-Range' => 'bytes 10-12/20',
+            'Content-Disposition' => 'attachment; filename=old.txt',
+            'Content-Location' => '/old',
+        ]);
+        self::assertSame('abc', $body);
+        self::assertStringContainsString('Content-Type: text/plain', $headers);
+        foreach (['Content-Encoding:', 'Content-Range:', 'Content-Disposition:', 'Content-Location:'] as $field) {
+            self::assertStringNotContainsString($field, $headers);
+        }
+    }
+
+    public function testPreparedRepresentationHeadersArePreserved(): void
+    {
+        [$headers, $body] = $this->emit(206, [
+            'Content-Range' => 'bytes 10-12/20',
+            'Content-Type' => 'text/plain',
+            'Content-Disposition' => 'inline; filename=data.txt',
+        ], 'abc', staged: ['Content-Range' => 'bytes 0-1/20']);
+        self::assertSame('abc', $body);
+        self::assertStringContainsString('Content-Range: bytes 10-12/20', $headers);
+        self::assertStringNotContainsString('Content-Range: bytes 0-1/20', $headers);
+        self::assertStringContainsString('Content-Disposition: inline; filename=data.txt', $headers);
+    }
+
+    public function testDuplicateCgiFieldsAndConflictingStatusAreRejected(): void
+    {
+        foreach ([
+            ['Status' => '302 Found'],
+            ['Location' => ['/one', '/two']],
+            ['Content-Type' => ['text/plain', 'text/html']],
+        ] as $fields) {
+            [, $body] = $this->emit(200, $fields, 'abc', expectFailure: true);
+            self::assertSame('rejected', $body);
+        }
+    }
+
+    public function testSuccessfulConnectCannotBeEmittedAsAnOrdinaryResponse(): void
+    {
+        [, $body] = $this->emit(200, [], 'abc', method: 'CONNECT', expectFailure: true);
+        self::assertSame('rejected', $body);
+        [$headers, $body] = $this->emit(403, [], 'denied', method: 'CONNECT');
+        self::assertStringContainsString('Status: 403', $headers);
+        self::assertSame('denied', $body);
+    }
+
     public function testExplicitNotModifiedRepresentationLengthIsPreserved(): void
     {
         [$headers, $body] = $this->emit(304, ['Content-Length' => '123'], 'discarded');
