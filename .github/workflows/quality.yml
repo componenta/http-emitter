@@ -39,6 +39,7 @@ jobs:
           fi
           test -x "$binary"
           "$binary" -v
+          "$binary" -v | grep -F "PHP ${{ matrix.php }}."
           echo "PHP_CGI_BINARY=$binary" >> "$GITHUB_ENV"
       - if: matrix.dependencies == 'highest'
         run: composer update --no-interaction --prefer-dist --no-progress

@@ -133,9 +133,9 @@ final class EmitterHeadersTest extends TestCase
             'Content-Location' => '/old',
         ]);
         self::assertSame('abc', $body);
-        self::assertStringContainsString('Content-Type: text/plain', $headers);
+        self::assertMatchesRegularExpression('/^Content-Type:\s*text\/plain(?:\s*;[^\r\n]*)?\r?$/mi', $headers);
         foreach (['Content-Encoding:', 'Content-Range:', 'Content-Disposition:', 'Content-Location:'] as $field) {
-            self::assertStringNotContainsString($field, $headers);
+            self::assertStringNotContainsString(strtolower($field), strtolower($headers));
         }
     }
 
