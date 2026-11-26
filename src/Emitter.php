@@ -264,7 +264,12 @@ final class Emitter implements EmitterInterface
             }
         }
         while (ob_get_level() > 0) {
-            if (!ob_end_clean()) {
+            try {
+                $cleaned = ob_end_clean();
+            } catch (\Throwable $exception) {
+                throw new EmitterException('Output buffer handler failed before response emission.', previous: $exception);
+            }
+            if (!$cleaned) {
                 throw new EmitterException('Cannot clean the active output buffer before emitting a response.');
             }
         }
