@@ -139,6 +139,36 @@ final class EmitterHeadersTest extends TestCase
         }
     }
 
+    public function testStagedFileOffloadAndRepresentationValidatorsAreDiscarded(): void
+    {
+        $staged = [
+            'X-Accel-Redirect' => '/internal/old',
+            'X-Sendfile' => '/srv/old',
+            'X-Accel-Limit-Rate' => '1',
+            'Accept-Ranges' => 'bytes',
+            'ETag' => '"old"',
+            'Last-Modified' => 'Thu, 01 Oct 2026 09:30:00 GMT',
+        ];
+        [$headers, $body] = $this->emit(403, ['Cache-Control' => 'no-store'], 'denied', staged: $staged);
+        self::assertSame('denied', $body);
+        foreach (array_keys($staged) as $name) {
+            self::assertStringNotContainsString(strtolower($name) . ':', strtolower($headers));
+        }
+
+        [$headers, $body] = $this->emit(200, [
+            'X-Accel-Redirect' => '/internal/new',
+            'X-Accel-Limit-Rate' => '100k',
+            'ETag' => '"new"',
+        ], '', staged: $staged);
+        self::assertSame('', $body);
+        self::assertStringContainsString('X-Accel-Redirect: /internal/new', $headers);
+        self::assertStringContainsString('X-Accel-Limit-Rate: 100k', $headers);
+        self::assertStringContainsString('ETag: "new"', $headers);
+        self::assertStringNotContainsString('x-sendfile:', strtolower($headers));
+        self::assertStringNotContainsString('last-modified:', strtolower($headers));
+        self::assertStringNotContainsString('content-length:', strtolower($headers));
+    }
+
     public function testPreparedRepresentationHeadersArePreserved(): void
     {
         [$headers, $body] = $this->emit(206, [
