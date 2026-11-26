@@ -266,7 +266,7 @@ final class Emitter implements EmitterInterface
         while (ob_get_level() > 0) {
             try {
                 $cleaned = ob_end_clean();
-            } catch (\Throwable $exception) {
+            } catch (\Throwable $exception) { // @phpstan-ignore catch.neverThrown (ob_end_clean invokes user callbacks that can throw; covered by BufferFailureTest)
                 throw new EmitterException('Output buffer handler failed before response emission.', previous: $exception);
             }
             if (!$cleaned) {
