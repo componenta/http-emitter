@@ -27,7 +27,11 @@ final class Emitter implements EmitterInterface
 
         $status = $response->getStatusCode();
         $strategy = $this->resolveStrategy($response);
-        $head = ($_SERVER['REQUEST_METHOD'] ?? null) === 'HEAD';
+        $method = $_SERVER['REQUEST_METHOD'] ?? null;
+        $head = $method === 'HEAD';
+        if ($method === 'CONNECT' && $status >= 200 && $status < 300) {
+            throw new EmitterException('A successful CONNECT requires a tunnel-capable HTTP transport.');
+        }
         $body = null;
         $length = null;
 
@@ -73,9 +77,15 @@ final class Emitter implements EmitterInterface
         $this->cleanBuffers();
         $this->assertCanEmit();
 
-        // Earlier PHP code may have staged framing headers. The final PSR-7
-        // response owns these fields; PHP/the web server owns transfer coding.
-        foreach (['Content-Length', 'Transfer-Encoding', 'Trailer'] as $name) {
+        // The final PSR-7 response owns framing, CGI control fields and
+        // representation metadata. Preserve unrelated native headers (e.g.
+        // Set-Cookie from session handling), not stale fields for a prior body.
+        foreach ([
+            'Content-Length', 'Transfer-Encoding', 'Trailer', 'Status', 'Location',
+            'Content-Type', 'Content-Encoding', 'Content-Language', 'Content-Location',
+            'Content-Range', 'Content-Disposition', 'Content-MD5', 'Content-Digest',
+            'Repr-Digest',
+        ] as $name) {
             header_remove($name);
         }
 
@@ -163,6 +173,13 @@ final class Emitter implements EmitterInterface
         }
 
         foreach ($response->getHeaders() as $name => $values) {
+            $field = strtolower($name);
+            if ($field === 'status') {
+                throw new EmitterException('CGI Status is reserved; use the PSR-7 response status code.');
+            }
+            if (in_array($field, ['content-type', 'location'], true) && count($values) !== 1) {
+                throw new EmitterException('CGI response fields must not be repeated: ' . $name);
+            }
             if (preg_match("@^[!#$%&'*+.^_\x60|~0-9A-Za-z-]+$@D", $name) !== 1) {
                 throw new EmitterException('Invalid HTTP response field name.');
             }
