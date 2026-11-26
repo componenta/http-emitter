@@ -5,7 +5,7 @@
     "license": "MIT",
     "require": {
         "php": "^8.4",
-        "componenta/config": "^3.0.0",
+        "componenta/config": "^3.0 || ^4.0",
         "psr/http-message": "^2.0"
     },
     "autoload": {
@@ -14,7 +14,12 @@
         }
     },
     "config": {
-        "sort-packages": true
+        "sort-packages": true,
+        "audit": {
+            "ignore-abandoned": {
+                "doctrine/annotations": "Transitive PHPBench development dependency; benchmarks use PHP attributes. Security advisories remain enforced."
+            }
+        }
     },
     "extra": {
         "componenta": {
@@ -23,16 +28,25 @@
             ]
         },
         "branch-alias": {
-            "dev-main": "1.0.x-dev"
+            "dev-main": "1.0.x-dev",
+            "dev-fix/http-response-audit": "1.0.x-dev"
         }
     },
     "minimum-stability": "stable",
     "prefer-stable": true,
     "require-dev": {
-        "nyholm/psr7": "^1.8",
-        "phpunit/phpunit": "^12.0"
+        "nyholm/psr7": "^1.8.2",
+        "phpunit/phpunit": "^12.0",
+        "phpstan/phpstan": "^2.1",
+        "phpbench/phpbench": "^1.7"
     },
     "scripts": {
-        "test": "@php vendor/bin/phpunit --bootstrap vendor/autoload.php tests"
+        "test": "@php vendor/bin/phpunit --configuration phpunit.xml.dist",
+        "phpstan": "@php vendor/bin/phpstan analyse src --level=8 --no-progress",
+        "check": [
+            "@phpstan",
+            "@test"
+        ],
+        "benchmark": "@php vendor/bin/phpbench run --report=aggregate"
     }
 }
