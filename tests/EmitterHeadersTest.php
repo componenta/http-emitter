@@ -169,6 +169,27 @@ final class EmitterHeadersTest extends TestCase
         self::assertStringNotContainsString('content-length:', strtolower($headers));
     }
 
+    public function testExplicitCachePolicyOverridesPreviouslyStagedNginxLifetime(): void
+    {
+        [$headers, $body] = $this->emit(200, ['Cache-Control' => 'private, no-store'], 'private', staged: [
+            'X-Accel-Expires' => '3600',
+            'Expires' => 'Fri, 27 Nov 2026 12:00:00 GMT',
+        ]);
+        self::assertSame('private', $body);
+        self::assertStringContainsString('cache-control: private, no-store', strtolower($headers));
+        self::assertStringNotContainsString('x-accel-expires:', strtolower($headers));
+        self::assertStringNotContainsString("\r\nexpires:", strtolower($headers));
+
+        // A native cache policy remains usable if the response has not
+        // specified any replacement policy.
+        [$headers] = $this->emit(200, [], 'abc', staged: ['X-Accel-Expires' => '0']);
+        self::assertStringContainsString('x-accel-expires: 0', strtolower($headers));
+
+        [$headers] = $this->emit(200, ['X-Accel-Expires' => '60'], 'abc', staged: ['X-Accel-Expires' => '3600']);
+        self::assertStringContainsString('x-accel-expires: 60', strtolower($headers));
+        self::assertStringNotContainsString('x-accel-expires: 3600', strtolower($headers));
+    }
+
     public function testPreparedRepresentationHeadersArePreserved(): void
     {
         [$headers, $body] = $this->emit(206, [
